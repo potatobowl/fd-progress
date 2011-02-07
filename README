@@ -1,0 +1,37 @@
+fd-progress
+
+inspired by http://blog.ksplice.com/2011/01/solving-problems-with-proc/ by keegan
+
+Requires: python 2.5+ and dialog (debian/ubuntu: apt-get install dialog)
+
+This python script will try to find running processes that has any interesting file descriptors (fd's),
+and let the user select one of them, and then apply a progress bar on the selected fd.
+
+Example:
+Say you start a cp operation or similar that will take a long time to execute.
+Since you might forgot to include some kind of progress feedback, you can use
+this script to hook onto the file descriptor and get a fancy progress bar.
+
+run example:
+./fd-progress
+
+will output something like (will differ plenty on your computer):
+Found 2 interesting processes.
+Which file are you reading from? Select the correct fd number.
+
+PID: 23644
+cmd: /usr/bin/python ./fdread.py
+->[0] /home/jqs/Documents/C++/large.pdf
+->[1] /home/jqs/tmpfd
+
+PID: 23049
+cmd: vim README
+->[2] /home/jqs/Dev/fd-progress/.README.swp
+
+Select fd: 
+
+As you can see, the cmd running on pid 23644 is a script that will copy a file for me quite slowly,
+and I know the large.pdf is the source file and tmpfd is the destination, so in this case I would
+want to know the read position in the source file, and hence will 0 and press ENTER.
+
+This should hopefully start displaying a progress bar using `dialog --gauge` and show the operation progress.
