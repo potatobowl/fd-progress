@@ -1,0 +1,148 @@
+#!/usr/bin/python
+import sys
+import os
+import re
+import getopt
+import subprocess
+import time
+
+def usage():
+	txt_usage = """
+	fd-progress (20110207)
+
+	usage: ./fd-progress [-a] [-d] [-u user]
+
+	-a Include processes without a tty attached (off default).
+	-d Include device fd's (default off).
+	-u Only include processes from this user (defaults to the running user).
+	"""
+	print txt_usage
+
+if __name__ == "__main__":
+	short_switches = "adu:"
+
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], short_switches, [])
+	except getopt.GetoptError:
+		print "Invalid arguments."
+		usage()
+		sys.exit(2)
+	else:
+		inc_user = os.environ["LOGNAME"]
+		inc_non_tty = False
+		inc_fd_dev = False
+		for c_arg, c_val in opts:
+			if c_arg == "-u":
+				inc_user = c_val
+			elif c_arg == "-a":
+				inc_non_tty = True
+			elif c_arg == "-d":
+				inc_fd_dev = True
+			
+		ps_cmd = "/bin/ps -o pid,tty,command -U " + inc_user
+		if not inc_non_tty: ps_cmd += " | /bin/grep pts/"
+		
+		link_skip_patterns = [re.compile("^/dev/pts/[0-9]+$", re.IGNORECASE), re.compile("^pipe:\[[0-9]+\]$", re.IGNORECASE)]
+		if inc_fd_dev:
+			link_skip_patterns = []
+
+	pipe = subprocess.Popen(ps_cmd, shell=True, stdout=subprocess.PIPE).stdout
+	procs = pipe.read()
+
+	proc_lines = procs.split("\n")
+	
+	valid_procs = {}
+	for c_proc in proc_lines:
+		try:
+			(c_pid, c_tty, c_cmd) = re.search("\s*([0-9]+)\s+(pts/[0-9]+)\s+(.*)\s*$", c_proc).groups()
+		except AttributeError:
+			continue
+		
+		try:
+			fd_path = os.path.join("/proc", c_pid, "fd")
+			fds = os.listdir(fd_path)
+		except OSError:
+		# proc cannot be read, probably due to permissions
+		# or the proc has ended
+			continue
+		
+		# check each fd item if the point to something interesting
+		valid_fds = []
+		for c_fd in fds:
+			try:
+				fd_link = os.readlink(os.path.join(fd_path, c_fd))
+			except OSError:
+			# processes dies all the time and its very likely some will dissapear
+			# during the run, hence all the try..except statments
+				continue
+
+			skip_matches = [k for k in link_skip_patterns if k.match(fd_link) is not None]
+			if len(skip_matches) > 0:
+				# link is pointing to a pts/tty. not interesting
+				continue
+			
+			# here we found an interesting link to a file. save this
+			this_fd = {"fd": c_fd, "path": os.path.join(fd_path, c_fd), "link": fd_link}
+			valid_fds.append(this_fd)
+
+		if len(valid_fds) <= 0:
+			# no interesting fds
+			continue
+		valid_procs[c_pid] = { \
+			"pid": c_pid, \
+			"tty": c_tty, \
+			"cmd": c_cmd, \
+			"fds": valid_fds}
+
+	if len(valid_procs) <= 0:
+		print "Did not find any interesting process/file reading."
+		sys.exit(2)
+
+	print "Found %d interesting processes." % (len(valid_procs), )
+	print "Which file are you reading from? Select the correct fd number.\n"
+	fd_idx = 0
+	fd_pid_mapping = []
+	for c_pid in valid_procs.keys():
+		print "PID:", c_pid
+		print "cmd:", valid_procs[c_pid]["cmd"]
+		for i, c_fd in enumerate(valid_procs[c_pid]["fds"]):
+			print "->[%d] %s" % (fd_idx, c_fd["link"])
+			fd_pid_mapping.append({"fd_idx": fd_idx, "pid": c_pid, "fd": i})
+			fd_idx += 1
+		print ""
+	
+	selected_fd = int(raw_input("Select fd: "))
+	if selected_fd > len(fd_pid_mapping):
+		print "Selected fd does not exist."
+		sys.exit(0)
+
+	# time for the progressbar magic
+	sel_pid = fd_pid_mapping[selected_fd]["pid"]
+	sel_fd = fd_pid_mapping[selected_fd]["fd"]
+	filename = valid_procs[sel_pid]["fds"][sel_fd]["link"]
+	dialog_text = "Progress reading: %s" % (filename,)
+	dialog_pipe = subprocess.Popen("/usr/bin/dialog --gauge \""+dialog_text+"\" 7 80", shell=True, stdin=subprocess.PIPE).stdin
+
+	# loop until progress is finished or file is deleted
+	file_size = os.path.getsize(filename) # in bytes
+	while True:
+		if not os.path.isfile(valid_procs[sel_pid]["fds"][sel_fd]["path"]):
+			sys.exit(0)
+		# open the corresponding fdinfo for the selected fd
+		fd_fp = open(os.path.join("/proc", sel_pid, "fdinfo", os.path.basename(valid_procs[sel_pid]["fds"][sel_fd]["path"])), "r")
+		fd_data = fd_fp.read()
+		fd_fp.close()
+
+		try:
+			fd_pos = int(re.search("^pos:\s+([0-9]+)", fd_data).groups()[0])
+		except AttributeError:
+			print "Can not find position in fdinfo."
+			sys.exit(2)
+
+		progress = int(100.0 * fd_pos / file_size)
+		dialog_pipe.write("%s\n" % (progress,))
+		
+		if progress >= 100:
+			sys.exit(0)
+		else:
+			time.sleep(1)
